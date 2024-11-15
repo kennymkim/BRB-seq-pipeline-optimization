@@ -1,0 +1,159 @@
+---
+title: "BRB-seq pipeline"
+output: html_document
+author: Sinergia Arthropod Moulting
+date: "2024-06-05"
+---
+
+# 1. Manual data processing
+
+To obtain the data read for analysis, the user needs to align the sequencing reads to the genome and perform the gene/UMI read count generation, which can be done in parallel with the sample demultiplexing. The user requires a terminal and a server or powerful computer with an installed set of standard bioinformatic tools for manual data processing.
+
+## 1.1. Required software
+
+-   **fastQC (version v0.11.7 or greater)**: Software for QC of fastq or bam files. This software is used to assess the quality of the sequencing reads, such as the number of duplicates, adapter contamination, repetitive sequence contamination, and GC content. The software is freely available from [here](https://www.bioinformatics.babraham.ac.uk/projects/fastqc/). The website also contains informative examples of good and poor-quality data.
+-   **STAR (version 2.7.10a)**: Software for reads alignment on reference genome (Dobin et al., 2013). It can be downloaded from [Github](https://github.com/alexdobin/STAR). STAR can only be run on UNIX systems and requires:
+    -   x86-64 compatible processors
+    -   64-bit Linux or Mac OS X.
+    -   \~30-40Gb of RAM
+-   **FeatureCounts (v.1.6.0 or greater)**: Software for counting genome-aligned reads for genomic features, such as genes and exons.
+-   **Picard (v.2.17.8 or greater)** and **Samtools (v.1.9 or greater)**: Collections of command-line utilities to manipulate with BAM files. Note: Picard requires Java version 8 or higher to be installed.
+-   **R Software (version 3 or greater)**.
+-   **(Optional) BRBseqTools (version 1.6)**: The software suite for processing BRB-seq libraries is available from: [here](https://github.com/DeplanckeLab/BRB-seqTools).
+
+## 1.2. Merging fastq files from individual lanes and/or libraries (Optional)
+
+Depending on the type of instrument used for sequencing, one or multiple R1/R2 fastq files per library may result from individual lanes of a flow cell. The fastq files from individual lanes should be merged into a single R1.fastq and a single R2.fastq files to simplify the following steps. This is an example of fastq files obtained from HiSeq 4 lane sequencing:
+
+mylibrary_L001_R1.fastq.gz, mylibrary_L002_R1.fastq.gz, mylibrary_L003_R1.fastq.gz, mylibrary_L004_R1.fastq.gz mylibrary_L001_R2.fastq.gz, mylibrary_L002_R2.fastq.gz, mylibrary_L003_R2.fastq.gz, mylibrary_L004_R2.fastq.gz
+
+To merge the fastq files from different lanes use a `cat` command in a terminal. This will generate two files: `mylibrary_R1.fastq.gz` and `mylibrary_R2.fastq.gz`, containing the information of the entire library.
+
+``` bash
+cat mylibrary_L001_R1.fastq.gz mylibrary_L002_R1.fastq.gz mylibrary_L003_R1.fastq.gz mylibrary_L004_R1.fastq.gz > mylibrary_R1.fastq.gz
+cat mylibrary_L001_R2.fastq.gz mylibrary_L002_R2.fastq.gz mylibrary_L003_R2.fastq.gz mylibrary_L004_R2.fastq.gz > mylibrary_R2.fastq.gz
+```
+
+Move these 2 fastq files in a new folder, which will be referenced in this manual as `$fastqfolder`.
+
+**NOTE:** This step can also be done if you sequenced your library in multiple sequencing runs.
+
+**Warning:** The order of merging files should be kept the same (for e.g., L001, L002, L003, L004, not L002, L001 ...) to avoid issues when demultiplexing the samples.
+
+## 1.3. Sequencing data quality check
+
+Run fastQC on both R1 and R2 fastq files. Use `–-outdir` option to indicate the path to the output directory. This directory will contain HTML reports produced by the software.
+
+``` bash
+fastqc --outdir $QCdir/ mylibrary_R1.fastq.gz
+fastqc --outdir $QCdir/ mylibrary_R2.fastq.gz
+```
+
+Check fastQC reports to assess the quality of the samples (see Software and materials).
+
+**NOTES:**
+
+-   Report for R1 fastq file may contain some "red flags" because it contains barcodes/UMIs. Still, it can provide useful information on the sequencing quality of the barcodes/UMIs.
+-   The main point of this step is to check the R2 fastq report. Of note, per base sequence content and kmer content are rarely green. If there is some adapter contamination or overrepresented sequence detected in the data, it may not be an issue (if the effect is limited to \<10\~20%). These are lost reads but most of them will be filtered out during the next step.
+
+## 1.4. Preparing the reference genome
+
+The fastq files must be aligned (or "mapped") on a reference genome. The STAR (Dobin et al., 20131) aligner is one of the most efficient tools for RNA-seq reads mapping. It contains a "soft-clipping" tool that automatically cuts the beginning or the end of the reads to improve the mapping efficiency, thus allowing the user to skip the step of trimming the reads for adapter contamination. Moreover, STAR has a mode called STARsolo, designed to align multiplexed data (such as BRB-seq) and directly generate count matrices.
+
+The STAR aligner requires a genome assembly together with a genome index file. The index file generation is a time-consuming process that is only performed once on a given genome assembly so that it can be completed in advance and the index files can be stored on the server for subsequent analyses.
+
+Download the right genome assembly fasta file (e.g., Homo_sapiens.GRCh38.dna.primary_assembly.fa) and gene annotation file in gtf format (e.g., Homo_sapiens.GRCh38.108.gtf) from Ensembl or UCSC repository. Below is an example of a human assembly:
+
+``` bash
+wget https://ftp.ensembl.org/pub/release-108/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+gzip -d Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz # unzip
+wget https://ftp.ensembl.org/pub/release-108/gtf/homo_sapiens/Homo_sapiens.GRCh38.108.gtf.gz
+gzip -d Homo_sapiens.GRCh38.108.gtf.gz # unzip
+```
+
+**NOTE:** It's recommended to download the primary_assembly fasta file when possible (without the 'sm' or 'rm' tags). If not available, download the top_level assembly. For the gtf, download the one that does not have the 'chr' or 'abinitio' tags.
+
+Use STAR to create an index for the genome assembly. Indicate the output folder name containing the index files using `--genomeDir` option:
+
+``` bash
+STAR --runMode genomeGenerate --genomeDir /path/to/genomeDir --genomeFastaFiles Homo_sapiens.GRCh38.dna.primary_assembly.fa --sjdbGTFfile Homo_sapiens.GRCh38.108.gtf --runThreadN 8
+```
+
+**NOTES:**
+
+-   The `--runThreadN` parameter can be modified depending on the number of cores available on your machine. The larger this number is, the more parallelized/fast the indexing will be.
+-   STAR can use up to 32-40Gb of RAM depending on the genome assembly. So, you should use a machine that has this RAM capacity.
+
+## 1.4.1 Aligning to the reference genome and generation of count matrices
+
+After the genome index is created, both R1 and R2 fastq files can be aligned to this reference genome. For this step, use the "solo" mode of STAR, which not only aligns the reads to the reference genome but also creates the gene read count and UMI (unique molecular identifier) count matrices.
+
+The following parameters should be adjusted according to the sequencing information:
+
+-   `--soloCBwhitelist`: a text file with the list of barcodes (one barcode sequence per lane) which is used by STAR for demultiplexing. This file is provided according to version of the MERCURIUS kit used. Example of "barcodes_96_V5B_star.txt":
+
+    ```         
+    >TACGTTATTCCGAA 
+    >AACAGGATAACTCC 
+    >ACTCAGGCACCTCC 
+    >ACGAGCAGATGCAG
+    ```
+
+-   `--soloCBstart`: Start position of the barcode in the R1 fastq file, equal to 1.
+
+-   `--soloCBlen`: Length of the barcode. This value should match the length of the barcode sequence in the file specified by
+
+-   `--soloCBwhitelist`. The barcode length depends on the version of the oligo-dT barcodes provided in the kit. For the barcode plate set V5 the default value is 14.
+
+-   `--soloUMIstart`: Start position of the UMI, it's`soloCBlen + 1`since the UMI starts right after the barcode sequence.
+
+-   `--soloUMIlen`: The length of UMI. This parameter depends on the version of the oligo-dT barcodes in the kit and the number of sequencing cycles performed for the Read1. For the barcode plate set V5 the default value is 14.
+
+-   `--readFilesIn`: name and path to the input fastq files.
+
+    The order of the fastq files provided in the script is important. The first fastq must contain genomic information, while the second the barcode and UMI content. Thus, files should be provided for STARsolo in the following order: \--readFilesIn mylibray_R2 mylibrary_R1.
+
+-   `--genomeDir`: a path to the directory containing the genome index files.
+
+    Output count matrix parameters:
+
+    By default, STARsolo produces UMI count matrix, i.e., containing unique non-duplicated reads per sample for each gene. This type of count data is a standard for single-cell RNA-seq analysis. For bulk RNA-seq analysis, a gene read count matrix is usually used. Following parameters will enable generating the output of interest.
+
+-   `--runThreadN\`: number of threads available.
+
+-   `\--soloUMIdedup NoDedup`, will generate a read count matrix output
+
+-   `\--soloUMIdedup NoDedup 1MM_All`, will generate both UMI and read count matrices in mtx format. This step will output bam files and count matrices in the folder \$bamdir.
+
+``` bash
+STAR --runMode alignReads --outSAMmapqUnique 60 --runThreadN 8 -- outSAMunmapped Within --soloStrand Forward --quantMode GeneCounts -- outBAMsortingThreadN 8 --genomeDir $genomeDir --soloType CB_UMI_Simple -- soloCBstart 1 --soloCBlen 14 --soloUMIstart 15 --soloUMIlen 14 --soloUMIdedup NoDedup 1MM_All --soloCellFilter None --soloCBwhitelist barcodes.txt --soloBarcodeReadLength 0 --soloFeatures Gene -- outSAMattributes NH HI nM AS CR UR CB UB GX GN sS sQ sM --outFilterMultimapNmax 1 --readFilesCommand zcat --outSAMtype BAM SortedByCoordinate --outFileNamePrefix $bamdir --readFilesIn mylibrary_R2.fastq.gz mylibrary_R1.fastq.gz
+```
+
+The demultiplexing statistics can be found in the "bamdir/Solo.out/Barcodes.stats" file. The alignment quality and performance metrics can be found in the "bamdir/Log.final.out" file.
+
+## 1.5 Generating the count matrix from .mtx file
+
+STARsolo will generate a count matrix (matrix.mtx file) located in the bamdir/Solo.out/Gene/raw folder. This file is a sparse matrix format that can be transformed into a standard count matrix using an R script provided below:
+
+``` r
+> #Myscript.R
+> library(data.table)
+> library(Matrix)
+> matrix_dir <- "$bamdir/Solo.out/Gene/raw"
+> f <- file(paste0(matrix_dir, "matrix.mtx"), "r")
+> mat <- as.data.frame(as.matrix(readMM(f)))
+> close(f)
+> feature.names = fread(paste0(matrix_dir, "features.tsv"), header = FALSE,
+> barcode.names = fread(paste0(matrix_dir, "barcodes.tsv"), header = FALSE, stringsAsFactors = FALSE, data.table = F)
+> colnames(mat) <- barcode.names$V1
+> rownames(mat) <- feature.names$V1
+> fwrite(mat, file = umi.counts.txt, sep = "\t", quote = F, row.names = T,
+   col.names = T)
+```
+
+The resulting UMI/gene count matrix can be used for a standard expression analysis following conventional bioinformatic tools such as DESeq or edgeR.<br> <br> <br> <br> 
+
+
+
+[*/kmkim06052024*]{style="float:right"}<br>
+
